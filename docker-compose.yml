@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  fetcher:
+    build: .
+    container_name: data_fetcher
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    command: ["--pairs", "BTC", "ETH", "--interval", "1h", "--limit", "10"]
+    restart: "no"
