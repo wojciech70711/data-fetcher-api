@@ -3,10 +3,18 @@ from pydantic import BaseModel
 from typing import List
 from datetime import datetime
 import csv
-import os
 from pathlib import Path
+import json
+import logging
+
+from kafka import KafkaProducer
+from kafka.errors import KafkaError
 
 app = FastAPI(title="Cryptocurrency OHLCV Data API")
+
+# Configure logging
+logger = logging.getLogger("data-api")
+logging.basicConfig(level=logging.INFO)
 
 # Data model for OHLCV
 class OHLCVData(BaseModel):
@@ -20,6 +28,59 @@ class OHLCVData(BaseModel):
 
 class OHLCVBatch(BaseModel):
     data: List[OHLCVData]
+
+# Kafka configuration
+KAFKA_BOOTSTRAP = ["192.168.100.8:9094"]
+KAFKA_TOPIC = "ohlcv"
+_producer = None
+
+def get_kafka_producer():
+    """Return a KafkaProducer instance (lazy init)."""
+    global _producer
+    if _producer is not None:
+        return _producer
+
+    try:
+        _producer = KafkaProducer(
+            bootstrap_servers=KAFKA_BOOTSTRAP,
+            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+            retries=3,
+            acks=1
+        )
+        logger.info("Kafka producer created, bootstrap=%s", KAFKA_BOOTSTRAP)
+    except Exception as e:
+        logger.error("Failed to create Kafka producer: %s", e)
+        _producer = None
+
+    return _producer
+
+def send_to_kafka(topic: str, message: dict):
+    """Send a message (dict) to Kafka topic. Non-blocking; logs errors."""
+    producer = get_kafka_producer()
+    if not producer:
+        logger.warning("Kafka producer not available; skipping send")
+        return False
+
+    try:
+        future = producer.send(topic, message)
+
+        # add callbacks to catch errors asynchronously
+        def on_send_success(record_metadata):
+            logger.debug("Message sent to %s partition=%s offset=%s",
+                         record_metadata.topic, record_metadata.partition, record_metadata.offset)
+
+        def on_send_error(exc):
+            logger.error("Failed to send message to Kafka: %s", exc)
+
+        future.add_callback(on_send_success)
+        future.add_errback(on_send_error)
+        return True
+    except KafkaError as ke:
+        logger.error("Kafka error while sending: %s", ke)
+        return False
+    except Exception as e:
+        logger.error("Unexpected error while sending to Kafka: %s", e)
+        return False
 
 # CSV file path
 DATA_DIR = Path("data")
@@ -90,6 +151,15 @@ async def add_ohlcv(data: OHLCVData):
             )
         
         write_to_csv(data)
+        
+        # Send to Kafka asynchronously (non-blocking)
+        try:
+            sent = send_to_kafka(KAFKA_TOPIC, data.dict())
+            if sent:
+                logger.info("OHLCV message queued for Kafka: %s", data.symbol)
+        except Exception:
+            logger.exception("Error while attempting to send single OHLCV to Kafka")
+        
         return {
             "status": "success",
             "message": f"OHLCV data for {data.symbol} stored successfully",
@@ -144,6 +214,15 @@ async def add_ohlcv_batch(batch: OHLCVBatch):
                 continue
             
             write_to_csv(ohlcv)
+            
+            # Send to Kafka asynchronously (non-blocking)
+            try:
+                sent = send_to_kafka(KAFKA_TOPIC, ohlcv.dict())
+                if sent:
+                    logger.debug("Queued OHLCV for Kafka: %s", ohlcv.symbol)
+            except Exception:
+                logger.exception("Error while attempting to send batch OHLCV to Kafka")
+            
             success_count += 1
         except Exception as e:
             errors.append({

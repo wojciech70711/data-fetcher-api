@@ -3,3 +3,4 @@ uvicorn[standard]
 pydantic
 python-dateutil
 requests
+kafka-python
