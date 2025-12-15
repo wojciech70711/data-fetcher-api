@@ -6,15 +6,38 @@ import csv
 from pathlib import Path
 import json
 import logging
-
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
+import uvicorn
+from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, API_TITLE, API_VERSION, API_DESCRIPTION, DATA_DIRECTORY, CSV_FILENAME_PATTERN
 
-app = FastAPI(title="Cryptocurrency OHLCV Data API")
+app = FastAPI(title=API_TITLE, version=API_VERSION, description=API_DESCRIPTION)
 
 # Configure logging
 logger = logging.getLogger("data-api")
-logging.basicConfig(level=logging.INFO)
+logger.setLevel(logging.INFO)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+
+# File handler - save logs to file
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+log_file = LOG_DIR / f"api_{datetime.now().strftime('%Y%m%d')}.log"
+file_handler = logging.FileHandler(log_file)
+file_handler.setLevel(logging.INFO)
+
+# Formatter
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+file_handler.setFormatter(formatter)
+
+# Add handlers
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
+logger.info(f"Logging configured. Log file: {log_file}")
 
 # Data model for OHLCV
 class OHLCVData(BaseModel):
@@ -30,8 +53,7 @@ class OHLCVBatch(BaseModel):
     data: List[OHLCVData]
 
 # Kafka configuration
-KAFKA_BOOTSTRAP = ["192.168.100.8:9094"]
-KAFKA_TOPIC = "ohlcv"
+KAFKA_BOOTSTRAP = [KAFKA_BOOTSTRAP_SERVERS]
 _producer = None
 
 def get_kafka_producer():
@@ -83,12 +105,12 @@ def send_to_kafka(topic: str, message: dict):
         return False
 
 # CSV file path
-DATA_DIR = Path("data")
+DATA_DIR = Path(DATA_DIRECTORY)
 DATA_DIR.mkdir(exist_ok=True)
 
 def get_csv_path(symbol: str) -> Path:
     """Get CSV file path for a symbol"""
-    filename = f"{symbol.replace('/', '_')}_ohlcv.csv"
+    filename = CSV_FILENAME_PATTERN.format(symbol=symbol.replace('/', '_'))
     return DATA_DIR / filename
 
 def write_to_csv(ohlcv: OHLCVData):
@@ -122,8 +144,8 @@ async def root():
     """API health check"""
     return {
         "status": "healthy",
-        "api": "Cryptocurrency OHLCV Data Storage API",
-        "version": "1.0.0"
+        "api": API_TITLE,
+        "version": API_VERSION
     }
 
 @app.post("/ohlcv/add")
@@ -154,7 +176,7 @@ async def add_ohlcv(data: OHLCVData):
         
         # Send to Kafka asynchronously (non-blocking)
         try:
-            sent = send_to_kafka(KAFKA_TOPIC, data.dict())
+            sent = send_to_kafka(KAFKA_TOPIC, data.model_dump())
             if sent:
                 logger.info("OHLCV message queued for Kafka: %s", data.symbol)
         except Exception:
@@ -217,7 +239,7 @@ async def add_ohlcv_batch(batch: OHLCVBatch):
             
             # Send to Kafka asynchronously (non-blocking)
             try:
-                sent = send_to_kafka(KAFKA_TOPIC, ohlcv.dict())
+                sent = send_to_kafka(KAFKA_TOPIC, ohlcv.model_dump())
                 if sent:
                     logger.debug("Queued OHLCV for Kafka: %s", ohlcv.symbol)
             except Exception:
@@ -239,102 +261,6 @@ async def add_ohlcv_batch(batch: OHLCVBatch):
         "errors": errors if errors else None
     }
 
-@app.get("/ohlcv/{symbol}")
-async def get_ohlcv_data(symbol: str):
-    """
-    Get all OHLCV data for a symbol
-    
-    Example: /ohlcv/BTC_USD or /ohlcv/ETH_USD
-    """
-    csv_path = get_csv_path(symbol)
-    
-    if not csv_path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"No data found for symbol {symbol}"
-        )
-    
-    try:
-        data = []
-        with open(csv_path, 'r') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                data.append({
-                    "timestamp": row['timestamp'],
-                    "symbol": row['symbol'],
-                    "open": float(row['open']),
-                    "high": float(row['high']),
-                    "low": float(row['low']),
-                    "close": float(row['close']),
-                    "volume": float(row['volume'])
-                })
-        
-        return {
-            "symbol": symbol,
-            "count": len(data),
-            "data": data
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/symbols")
-async def get_symbols():
-    """Get all symbols with stored data"""
-    symbols = []
-    try:
-        for csv_file in DATA_DIR.glob("*_ohlcv.csv"):
-            symbol = csv_file.stem.replace('_ohlcv', '').replace('_', '/')
-            symbols.append(symbol)
-        
-        return {
-            "count": len(symbols),
-            "symbols": sorted(symbols)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/stats/{symbol}")
-async def get_symbol_stats(symbol: str):
-    """Get statistics for a symbol"""
-    csv_path = get_csv_path(symbol)
-    
-    if not csv_path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"No data found for symbol {symbol}"
-        )
-    
-    try:
-        prices = []
-        volumes = []
-        
-        with open(csv_path, 'r') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                prices.append(float(row['close']))
-                volumes.append(float(row['volume']))
-        
-        if not prices:
-            raise HTTPException(status_code=404, detail="No valid data found")
-        
-        return {
-            "symbol": symbol,
-            "records": len(prices),
-            "price": {
-                "highest": max(prices),
-                "lowest": min(prices),
-                "average": sum(prices) / len(prices)
-            },
-            "volume": {
-                "total": sum(volumes),
-                "average": sum(volumes) / len(volumes)
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 if __name__ == "__main__":
-    import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

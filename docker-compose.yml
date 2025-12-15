@@ -6,3 +6,5 @@ services:
       - ./logs:/app/logs
       - ./data:/app/data
     restart: "no"
+    ports:
+      - "8000:8000"

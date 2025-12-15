@@ -19,5 +19,4 @@ COPY . /app
 RUN mkdir -p /app/logs && chown -R root:root /app/logs
 
 # Default command — keep it overridable
-ENTRYPOINT ["python", "get_data_from_market.py"]
-CMD ["--pairs", "BTC", "ETH", "--interval", "1h", "--limit", "10"]
+ENTRYPOINT ["python", "main.py"]
