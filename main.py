@@ -2,14 +2,13 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
 from datetime import datetime
-import csv
 from pathlib import Path
 import json
 import logging
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 import uvicorn
-from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, API_TITLE, API_VERSION, API_DESCRIPTION, DATA_DIRECTORY, CSV_FILENAME_PATTERN
+from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, API_TITLE, API_VERSION, API_DESCRIPTION
 
 app = FastAPI(title=API_TITLE, version=API_VERSION, description=API_DESCRIPTION)
 
@@ -76,6 +75,22 @@ def get_kafka_producer():
 
     return _producer
 
+def check_kafka_broker():
+    """Check if Kafka broker is reachable."""
+    try:
+        producer = KafkaProducer(
+            bootstrap_servers=KAFKA_BOOTSTRAP,
+            request_timeout_ms=5000,
+            api_version_auto_timeout_ms=5000
+        )
+        # Get cluster metadata to verify connection
+        producer.bootstrap_connected()
+        producer.close()
+        return True
+    except Exception as e:
+        logger.warning("Kafka broker not reachable: %s", e)
+        return False
+
 def send_to_kafka(topic: str, message: dict):
     """Send a message (dict) to Kafka topic. Non-blocking; logs errors."""
     producer = get_kafka_producer()
@@ -104,48 +119,15 @@ def send_to_kafka(topic: str, message: dict):
         logger.error("Unexpected error while sending to Kafka: %s", e)
         return False
 
-# CSV file path
-DATA_DIR = Path(DATA_DIRECTORY)
-DATA_DIR.mkdir(exist_ok=True)
-
-def get_csv_path(symbol: str) -> Path:
-    """Get CSV file path for a symbol"""
-    filename = CSV_FILENAME_PATTERN.format(symbol=symbol.replace('/', '_'))
-    return DATA_DIR / filename
-
-def write_to_csv(ohlcv: OHLCVData):
-    """Write OHLCV data to CSV file"""
-    csv_path = get_csv_path(ohlcv.symbol)
-    file_exists = csv_path.exists()
-    
-    try:
-        with open(csv_path, 'a', newline='') as csvfile:
-            fieldnames = ['timestamp', 'symbol', 'open', 'high', 'low', 'close', 'volume']
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            
-            # Write header if file is new
-            if not file_exists:
-                writer.writeheader()
-            
-            writer.writerow({
-                'timestamp': ohlcv.timestamp,
-                'symbol': ohlcv.symbol,
-                'open': ohlcv.open,
-                'high': ohlcv.high,
-                'low': ohlcv.low,
-                'close': ohlcv.close,
-                'volume': ohlcv.volume
-            })
-    except IOError as e:
-        raise HTTPException(status_code=500, detail=f"Error writing to CSV: {str(e)}")
-
 @app.get("/")
 async def root():
     """API health check"""
+    kafka_status = "connected" if check_kafka_broker() else "disconnected"
     return {
         "status": "healthy",
         "api": API_TITLE,
-        "version": API_VERSION
+        "version": API_VERSION,
+        "kafka_broker": kafka_status
     }
 
 @app.post("/ohlcv/add")
@@ -172,8 +154,6 @@ async def add_ohlcv(data: OHLCVData):
                 detail="Close price must be between low and high prices"
             )
         
-        write_to_csv(data)
-        
         # Send to Kafka asynchronously (non-blocking)
         try:
             sent = send_to_kafka(KAFKA_TOPIC, data.model_dump())
@@ -185,7 +165,6 @@ async def add_ohlcv(data: OHLCVData):
         return {
             "status": "success",
             "message": f"OHLCV data for {data.symbol} stored successfully",
-            "file": str(get_csv_path(data.symbol))
         }
     except HTTPException:
         raise
@@ -234,8 +213,6 @@ async def add_ohlcv_batch(batch: OHLCVBatch):
                     "error": "Close price must be between low and high prices"
                 })
                 continue
-            
-            write_to_csv(ohlcv)
             
             # Send to Kafka asynchronously (non-blocking)
             try:
