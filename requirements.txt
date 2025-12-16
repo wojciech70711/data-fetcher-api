@@ -4,3 +4,8 @@ pydantic
 python-dateutil
 requests
 kafka-python
+python-dotenv
+pyspark==3.5.0
+kafka-python==2.0.2
+py4j==0.10.9.7
+numpy>=1.21.0,<2.0.0

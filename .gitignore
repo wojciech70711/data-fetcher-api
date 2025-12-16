@@ -118,6 +118,17 @@ data/
 logs/
 *.csv
 
+# Spark/Hadoop directories
+hadoop/
+checkpoints/
+predictions/
+models/
+metastore_db/
+derby.log
+spark-warehouse/
+crypto_price_model/
+checkpoint_ml/
+
 # Type checkers
 .mypy_cache/
 .dmypy.json
