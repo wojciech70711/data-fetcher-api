@@ -137,6 +137,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+crypto_price_model/
+checkpoint_ml/
 
 # Git
 .git
