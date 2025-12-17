@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional, Dict
 from datetime import datetime
 from pathlib import Path
 import json
@@ -8,6 +8,9 @@ import logging
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 import uvicorn
+import pickle
+import numpy as np
+import os
 from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, API_TITLE, API_VERSION, API_DESCRIPTION
 
 app = FastAPI(title=API_TITLE, version=API_VERSION, description=API_DESCRIPTION)
@@ -38,6 +41,48 @@ logger.addHandler(file_handler)
 
 logger.info(f"Logging configured. Log file: {log_file}")
 
+# ML Model configuration
+MODEL_PATH = "models/gbt_model.pkl"
+SCALER_PATH = "models/scaler.pkl"
+_model = None
+_scaler = None
+
+def load_ml_model():
+    """Load the trained ML model and scaler"""
+    global _model, _scaler
+    if _model is not None and _scaler is not None:
+        return _model, _scaler
+    
+    try:
+        if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
+            with open(MODEL_PATH, 'rb') as f:
+                _model = pickle.load(f)
+            with open(SCALER_PATH, 'rb') as f:
+                _scaler = pickle.load(f)
+            logger.info("ML model loaded successfully")
+            return _model, _scaler
+        else:
+            logger.warning("ML model not found. Train the model first using ml_predictor.py")
+            return None, None
+    except Exception as e:
+        logger.error(f"Error loading ML model: {e}")
+        return None, None
+
+def get_trading_signal(current_price: float, predicted_price: float) -> tuple:
+    """Generate trading signal based on prediction"""
+    change_pct = ((predicted_price - current_price) / current_price) * 100
+    
+    if change_pct > 1.0:
+        return "STRONG BUY", change_pct
+    elif change_pct > 0.3:
+        return "BUY", change_pct
+    elif change_pct < -1.0:
+        return "STRONG SELL", change_pct
+    elif change_pct < -0.3:
+        return "SELL", change_pct
+    else:
+        return "HOLD", change_pct
+
 # Data model for OHLCV
 class OHLCVData(BaseModel):
     timestamp: str  # ISO format: 2024-12-13T10:30:00
@@ -50,6 +95,18 @@ class OHLCVData(BaseModel):
 
 class OHLCVBatch(BaseModel):
     data: List[OHLCVData]
+
+class PredictionRequest(BaseModel):
+    ohlcv_data: List[OHLCVData]
+
+class PredictionResponse(BaseModel):
+    status: str
+    predicted_price: Optional[float] = None
+    current_price: Optional[float] = None
+    expected_change_pct: Optional[float] = None
+    trading_signal: Optional[str] = None
+    batch_stats: Optional[Dict] = None
+    message: Optional[str] = None
 
 # Kafka configuration
 KAFKA_BOOTSTRAP = [KAFKA_BOOTSTRAP_SERVERS]
@@ -123,11 +180,15 @@ def send_to_kafka(topic: str, message: dict):
 async def root():
     """API health check"""
     kafka_status = "connected" if check_kafka_broker() else "disconnected"
+    model, scaler = load_ml_model()
+    model_status = "loaded" if model is not None else "not_loaded"
+    
     return {
         "status": "healthy",
         "api": API_TITLE,
         "version": API_VERSION,
-        "kafka_broker": kafka_status
+        "kafka_broker": kafka_status,
+        "ml_model": model_status
     }
 
 @app.post("/ohlcv/add")
@@ -237,6 +298,133 @@ async def add_ohlcv_batch(batch: OHLCVBatch):
         "failed": len(errors),
         "errors": errors if errors else None
     }
+
+@app.post("/predict", response_model=PredictionResponse)
+async def predict_price(request: PredictionRequest):
+    """
+    Predict cryptocurrency price from OHLCV batch data
+    
+    Example:
+    {
+        "ohlcv_data": [
+            {
+                "timestamp": "2024-12-17T10:00:00",
+                "symbol": "BTC/USD",
+                "open": 42000.50,
+                "high": 42500.00,
+                "low": 41500.00,
+                "close": 42100.25,
+                "volume": 1500.5
+            },
+            {
+                "timestamp": "2024-12-17T10:01:00",
+                "symbol": "BTC/USD",
+                "open": 42100.25,
+                "high": 42600.00,
+                "low": 41800.00,
+                "close": 42300.00,
+                "volume": 1600.0
+            }
+        ]
+    }
+    """
+    try:
+        # Load model
+        model, scaler = load_ml_model()
+        if model is None or scaler is None:
+            raise HTTPException(
+                status_code=503,
+                detail="ML model not available. Please train the model first using ml_predictor.py"
+            )
+        
+        # Validate input
+        if not request.ohlcv_data or len(request.ohlcv_data) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one OHLCV data point is required"
+            )
+        
+        # Validate prices
+        for idx, data in enumerate(request.ohlcv_data):
+            if not (data.low <= data.close <= data.high):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid data at index {idx}: close price must be between low and high"
+                )
+        
+        # Calculate batch statistics
+        batch_stats = {
+            "num_messages": len(request.ohlcv_data),
+            "avg_close": np.mean([d.close for d in request.ohlcv_data]),
+            "avg_volume": np.mean([d.volume for d in request.ohlcv_data]),
+            "price_range": max(d.high for d in request.ohlcv_data) - min(d.low for d in request.ohlcv_data),
+            "total_volume": sum(d.volume for d in request.ohlcv_data)
+        }
+        
+        # Get latest data point for prediction
+        latest = request.ohlcv_data[-1]
+        
+        # Create feature vector (simplified - using latest values)
+        features = np.array([[
+            latest.open,
+            latest.high,
+            latest.low,
+            latest.volume,
+            0.0,  # price_change
+            0.0,  # price_change_pct
+            latest.close,  # ma_5
+            latest.close,  # ma_10
+            latest.close,  # ma_20
+            0.0,  # volatility
+            latest.high - latest.low,  # hl_spread
+            abs(latest.close - latest.open),  # oc_spread
+            latest.volume,  # volume_ma
+            0.0   # volume_change
+        ]])
+        
+        # Scale and predict
+        features_scaled = scaler.transform(features)
+        predicted_price = float(model.predict(features_scaled)[0])
+        
+        # Generate trading signal
+        current_price = latest.close
+        signal, change_pct = get_trading_signal(current_price, predicted_price)
+        
+        logger.info(f"Prediction for {latest.symbol}: ${predicted_price:.2f} ({signal})")
+        
+        return PredictionResponse(
+            status="success",
+            predicted_price=round(predicted_price, 2),
+            current_price=round(current_price, 2),
+            expected_change_pct=round(change_pct, 2),
+            trading_signal=signal,
+            batch_stats=batch_stats,
+            message=f"Prediction based on {len(request.ohlcv_data)} OHLCV data points"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error making prediction: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/predict/single")
+async def predict_single(data: OHLCVData):
+    """
+    Predict price from a single OHLCV data point
+    
+    Example:
+    {
+        "timestamp": "2024-12-17T10:00:00",
+        "symbol": "BTC/USD",
+        "open": 42000.50,
+        "high": 42500.00,
+        "low": 41500.00,
+        "close": 42100.25,
+        "volume": 1500.5
+    }
+    """
+    return await predict_price(PredictionRequest(ohlcv_data=[data]))
 
 if __name__ == "__main__":
 

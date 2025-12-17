@@ -118,6 +118,35 @@ def send_batch_to_api(ohlcv_list):
         logger.error(f"Exception sending to API: {str(e)}")
         return False
 
+def get_price_prediction(ohlcv_list):
+    """
+    Get price prediction from the ML model API
+    """
+    if not ohlcv_list:
+        return None
+    
+    try:
+        # Use the last 5-10 data points for better prediction
+        prediction_data = ohlcv_list[-min(10, len(ohlcv_list)):]
+        
+        payload = {"ohlcv_data": prediction_data}
+        response = requests.post(f"{BASE_URL}/predict", json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("status") == "success":
+                return result
+            else:
+                logger.warning(f"Prediction status: {result.get('status')} - {result.get('message')}")
+                return None
+        else:
+            logger.warning(f"Prediction API Error: {response.status_code}")
+            return None
+    
+    except Exception as e:
+        logger.warning(f"Exception getting prediction: {str(e)}")
+        return None
+
 def parse_arguments():
     """Parse command-line arguments for pairs and time range"""
     parser = argparse.ArgumentParser(
@@ -245,6 +274,18 @@ def test_api(crypto_pairs, interval, limit):
         if data:
             logger.info(f"OK ({len(data)} candles)")
             all_data.extend(data)
+            
+            # Get price prediction for this symbol
+            prediction = get_price_prediction(data)
+            if prediction:
+                logger.info("-" * 70)
+                logger.info(f"ML PREDICTION for {display_symbol}:")
+                logger.info(f"  Current Price:      ${prediction['current_price']:,.2f}")
+                logger.info(f"  Predicted Price:    ${prediction['predicted_price']:,.2f}")
+                logger.info(f"  Expected Change:    {prediction['expected_change_pct']:+.2f}%")
+                logger.info(f"  Trading Signal:     {prediction['trading_signal']}")
+                logger.info(f"  Based on:           {prediction['batch_stats']['num_messages']} data points")
+                logger.info("-" * 70)
         else:
             logger.error("FAILED")
         time.sleep(0.5)  # Rate limiting
