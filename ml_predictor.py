@@ -27,8 +27,8 @@ if sys.platform.startswith('win'):
     os.environ['PATH'] = f"{os.path.join(hadoop_home, 'bin')};{os.environ.get('PATH', '')}"
 
 # Configuration
-KAFKA_BROKER = "localhost:9092"
-KAFKA_TOPIC = "ohlcv"
+KAFKA_BROKER = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "ohlcv")
 TRAINING_DATA_FILE = "data/train_data.csv"
 MODEL_PATH = "models/gbt_model.pkl"
 SCALER_PATH = "models/scaler.pkl"
