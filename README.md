@@ -1,5 +1,5 @@
 # Cryptocurrency Data API & ML Predictor
-
+Repozytorium: https://github.com/wojciech70711/data-fetcher-api.git
 ## Opis Projektu
 
 System do analizy i predykcji cen kryptowalut wykorzystujący Apache Kafka, PySpark oraz uczenia maszynowego. Projekt składa się z trzech głównych komponentów:
