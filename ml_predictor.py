@@ -3,6 +3,7 @@ Simple ML Price Predictor for Cryptocurrency using PySpark Streaming
 Trains on historical CSV data and consumes OHLCV batches from Kafka
 """
 
+import uuid
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, avg, sum as spark_sum, max as spark_max, min as spark_min, count
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType
@@ -13,6 +14,9 @@ from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 import os
 import sys
+import json
+from datetime import datetime
+from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -29,6 +33,8 @@ TRAINING_DATA_FILE = "data/train_data.csv"
 MODEL_PATH = "models/gbt_model.pkl"
 SCALER_PATH = "models/scaler.pkl"
 BATCH_DURATION = "10 seconds"
+RESULTS_DIR = Path("results")
+RESULTS_DIR.mkdir(exist_ok=True)
 
 class CryptoPredictor:
     def __init__(self):
@@ -235,10 +241,7 @@ class CryptoPredictor:
         if batch_df.isEmpty():
             return
         
-        batch_count = batch_df.count()
-        print(f"\n{'='*80}")
-        print(f"PROCESSING BATCH #{batch_id} ({batch_count} messages)")
-        print(f"{'='*80}")
+ 
         
         # Calculate batch statistics
         stats = batch_df.agg(
@@ -302,12 +305,42 @@ class CryptoPredictor:
         print(f"   Expected Change:   {change_pct:+.2f}%")
         print(f"   Signal:            {signal}")
         print(f"{'='*80}\n")
+        
+        # Save results to file
+        batch_id = uuid.uuid4().hex[:8]
+
+        result_data = {
+            "batch_id": batch_id,
+            "timestamp": datetime.now().isoformat(),
+            "batch_statistics": {
+                "num_messages": int(stats['num_messages']),
+                "avg_close": round(float(stats['avg_close']), 2),
+                "avg_volume": round(float(stats['avg_volume']), 2),
+                "price_range": round(float(stats['price_range']), 2),
+                "total_volume": round(float(stats['total_volume']), 2)
+            },
+            "prediction": {
+                "symbol": latest['symbol'],
+                "current_price": round(float(current_price), 2),
+                "predicted_price": round(float(prediction), 2),
+                "expected_change_pct": round(float(change_pct), 2),
+                "trading_signal": signal
+            }
+        }
+        
+        result_file = RESULTS_DIR / f"batch_{batch_id}.json"
+        try:
+            with open(result_file, 'w') as f:
+                json.dump(result_data, f, indent=2)
+            print(f"Results saved to: {result_file}")
+        except Exception as e:
+            print(f"Error saving results: {e}")
 
 
 def main():
     """Main function"""
     print("="*80)
-    print("Crypto Price Predictor with PySpark Streaming")
+    print("Crypto Price Predicting ML model with PySpark Streaming")
     print("="*80)
     
     predictor = CryptoPredictor()

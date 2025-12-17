@@ -11,6 +11,8 @@ import uvicorn
 import pickle
 import numpy as np
 import os
+import uuid
+import time
 from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, API_TITLE, API_VERSION, API_DESCRIPTION
 
 app = FastAPI(title=API_TITLE, version=API_VERSION, description=API_DESCRIPTION)
@@ -44,6 +46,8 @@ logger.info(f"Logging configured. Log file: {log_file}")
 # ML Model configuration
 MODEL_PATH = "models/gbt_model.pkl"
 SCALER_PATH = "models/scaler.pkl"
+RESULTS_DIR = Path("results")
+RESULTS_DIR.mkdir(exist_ok=True)
 _model = None
 _scaler = None
 
@@ -261,6 +265,14 @@ async def add_ohlcv_batch(batch: OHLCVBatch):
         ]
     }
     """
+    # Remove all files from results folder
+    try:
+        for file in RESULTS_DIR.glob("*.json"):
+            file.unlink()
+        logger.info(f"Cleared results folder: {RESULTS_DIR}")
+    except Exception as e:
+        logger.warning(f"Error clearing results folder: {e}")
+    
     success_count = 0
     errors = []
     
@@ -291,13 +303,43 @@ async def add_ohlcv_batch(batch: OHLCVBatch):
                 "error": str(e)
             })
     
+    # Wait for result files if results folder is empty
+    max_wait_time = 30  # seconds
+    wait_interval = 0.5  # seconds
+    elapsed_time = 0
+    
+    while elapsed_time < max_wait_time:
+        result_files = list(RESULTS_DIR.glob("batch_*.json"))
+        if result_files:
+            logger.info(f"Found {len(result_files)} result file(s) after waiting {elapsed_time:.1f}s")
+            break
+        time.sleep(wait_interval)
+        elapsed_time += wait_interval
+    else:
+        logger.warning(f"No result files found after waiting {max_wait_time}s")
+    
+    # Read batch result files from results folder
+    batch_results = []
+    try:
+        for result_file in sorted(RESULTS_DIR.glob("batch_*.json")):
+            try:
+                with open(result_file, 'r') as f:
+                    batch_data = json.load(f)
+                    batch_results.append(batch_data)
+            except Exception as e:
+                logger.warning(f"Error reading result file {result_file}: {e}")
+    except Exception as e:
+        logger.warning(f"Error scanning results folder: {e}")
+    
     return {
         "status": "completed",
         "total_records": len(batch.data),
         "successful": success_count,
         "failed": len(errors),
-        "errors": errors if errors else None
+        "errors": errors if errors else None,
+        "batch_results": batch_results if batch_results else None
     }
+
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_price(request: PredictionRequest):

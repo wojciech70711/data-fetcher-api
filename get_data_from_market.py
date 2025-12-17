@@ -34,11 +34,7 @@ BINANCE_API = "https://api4.binance.com/api/v3"
 
 # Default cryptocurrency pairs
 DEFAULT_PAIRS = [
-    ("BTCUSDT", "BTC/USDT"),  # Bitcoin
-    ("ETHUSDT", "ETH/USDT"),  # Ethereum
-    ("XRPUSDT", "XRP/USDT"),  # Ripple
-    ("BNBUSDT", "BNB/USDT"),  # Binance Coin
-    ("ADAUSDT", "ADA/USDT"),  # Cardano
+    ("BTCUSDT", "BTC/USDT")  # Bitcoin
 ]
 
 # Default timeframe for historical data
@@ -101,12 +97,15 @@ def send_batch_to_api(ohlcv_list):
     
     try:
         payload = {"data": ohlcv_list}
-        response = requests.post(f"{BASE_URL}/ohlcv/batch", json=payload, timeout=5)
+        response = requests.post(f"{BASE_URL}/ohlcv/batch", json=payload, timeout=30)
         
         if response.status_code == 200:
             result = response.json()
             if result.get("successful", 0) > 0:
                 logger.info(f"Sent {result['successful']}/{result['total_records']} records")
+                if result.get('batch_results'):
+                    logger.info("Model returned predictions:")
+                    logger.info(json.dumps(result['batch_results'], indent=2))
                 if result.get("failed", 0) > 0:
                     logger.warning(f"{result['failed']} records had errors")
                 return True
@@ -197,6 +196,13 @@ Valid intervals: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1M
         help='Show available cryptocurrency pairs'
     )
     
+    parser.add_argument(
+        '--no-kafka',
+        action='store_false',
+        dest='kafka',
+        help='Skip sending data to Kafka (use direct prediction mode instead)'
+    )
+    
     args = parser.parse_args()
     return args
 
@@ -254,40 +260,42 @@ def list_available_pairs():
         logger.info(f"  {symbol:8} - {name}")
     logger.info("Usage: python get_data_from_market.py --pairs BTC ETH XRP")
 
-def test_api(crypto_pairs, interval, limit):
-    """Fetch data from Binance and send to local API"""
-    global CRYPTO_PAIRS, INTERVAL, LIMIT
-    CRYPTO_PAIRS = crypto_pairs
-    INTERVAL = interval
-    LIMIT = limit
-    
+
+def get_all_data(crypto_pairs, interval, limit):
+        global CRYPTO_PAIRS, INTERVAL, LIMIT
+        CRYPTO_PAIRS = crypto_pairs
+        INTERVAL = interval
+        LIMIT = limit
+        all_data = []
+        for binance_symbol, display_symbol in CRYPTO_PAIRS:
+            logger.info(f"Fetching {display_symbol}...")
+            data = fetch_binance_data(binance_symbol, INTERVAL, LIMIT)
+            if data:
+                logger.info(f"OK ({len(data)} candles)")
+                all_data.extend(data)
+        return all_data
+
+
+def send_batch_to_model(all_data):
+    """get all_data and build predictions using ML model without kafka"""
     logger.info("=" * 70)
     logger.info("Cryptocurrency OHLCV Data API - Binance Data Fetcher")
     logger.info("=" * 70)
     logger.info(f"Configuration: Pairs={', '.join([pair[1] for pair in CRYPTO_PAIRS])}, Interval={INTERVAL}, Limit={LIMIT} candles")
-    
-    logger.info("Fetching data from Binance API...")
-    all_data = []
-    for binance_symbol, display_symbol in CRYPTO_PAIRS:
-        logger.info(f"Fetching {display_symbol}...")
-        data = fetch_binance_data(binance_symbol, INTERVAL, LIMIT)
-        if data:
-            logger.info(f"OK ({len(data)} candles)")
-            all_data.extend(data)
-            
-            # Get price prediction for this symbol
-            prediction = get_price_prediction(data)
-            if prediction:
-                logger.info("-" * 70)
-                logger.info(f"ML PREDICTION for {display_symbol}:")
-                logger.info(f"  Current Price:      ${prediction['current_price']:,.2f}")
-                logger.info(f"  Predicted Price:    ${prediction['predicted_price']:,.2f}")
-                logger.info(f"  Expected Change:    {prediction['expected_change_pct']:+.2f}%")
-                logger.info(f"  Trading Signal:     {prediction['trading_signal']}")
-                logger.info(f"  Based on:           {prediction['batch_stats']['num_messages']} data points")
-                logger.info("-" * 70)
-        else:
-            logger.error("FAILED")
+    logger.info("Fetching data from Binance API...")    
+    # Get price prediction for this symbol
+    prediction = get_price_prediction(all_data)
+    if prediction:
+        logger.info("-" * 70)
+        logger.info(f"ML PREDICTION for {all_data.display_symbol}:")
+        logger.info(f"  Current Price:      ${prediction['current_price']:,.2f}")
+        logger.info(f"  Predicted Price:    ${prediction['predicted_price']:,.2f}")
+        logger.info(f"  Expected Change:    {prediction['expected_change_pct']:+.2f}%")
+        logger.info(f"  Trading Signal:     {prediction['trading_signal']}")
+        logger.info(f"  Based on:           {prediction['batch_stats']['num_messages']} data points")
+        logger.info("-" * 70)
+    else:
+        logger.error("FAILED")
         time.sleep(0.5)  # Rate limiting
     
     logger.info(f"Total data retrieved: {len(all_data)} OHLCV records")
@@ -303,15 +311,20 @@ def test_api(crypto_pairs, interval, limit):
 
 if __name__ == "__main__":
     logger.info(f"Log file: {LOG_FILE}")
+    
     args = parse_arguments()
+    all_data = []
+    
     
     # Show available pairs if requested
     if args.list_pairs:
         list_available_pairs()
         sys.exit(0)
     
-    # Get cryptocurrency pairs from arguments
-    crypto_pairs = get_crypto_pairs(args.pairs)
+    # Get crypto pairs, interval, and limit from arguments or use defaults
+    crypto_pairs = get_crypto_pairs(args.pairs) if args.pairs else CRYPTO_PAIRS
+    interval = args.interval if args.interval else INTERVAL
+    limit = args.limit if args.limit else LIMIT
     
     # Validate interval
     valid_intervals = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1M']
@@ -324,12 +337,31 @@ if __name__ == "__main__":
     if args.limit < 1 or args.limit > 1000:
         logger.error("Limit must be between 1 and 1000")
         sys.exit(1)
-    
-    try:
-        test_api(crypto_pairs, args.interval, args.limit)
-    except KeyboardInterrupt:
-        logger.warning("Demo interrupted by user")
-        sys.exit(0)
-    except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        sys.exit(1)
+
+    all_data = get_all_data(crypto_pairs, interval, limit)
+
+
+    if args.kafka:
+        try:
+            logger.info(f"Sending {len(all_data)} records to {BASE_URL}/ohlcv/batch...")
+            if all_data:
+                send_batch_to_api(all_data)
+                logger.info("OK: Data fetching and upload completed!")
+            else:
+                logger.error("No data to send. Check your Binance connection.")         
+            logger.info("=" * 70)
+        except KeyboardInterrupt:
+            logger.warning("Action interrupted by user")
+            sys.exit(0)
+        except Exception as e:
+            logger.error(f"Error: {str(e)}")
+            sys.exit(1)
+    else:
+        try:
+            send_batch_to_model(all_data)
+        except KeyboardInterrupt:
+            logger.warning("Action interrupted by user")
+            sys.exit(0)
+        except Exception as e:
+            logger.error(f"Error: {str(e)}")
+            sys.exit(1)

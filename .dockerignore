@@ -114,7 +114,8 @@ venv.bak/
 *~
 
 # Data and logs (exclude from image, mount as volumes)
-data/
+models/
+results/
 logs/
 *.csv
 
